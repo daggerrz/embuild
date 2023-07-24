@@ -31,7 +31,7 @@ glob = ["globwalk"]
 # Cargo.toml and config.toml utilities
 manifest = ["cargo_toml", "toml"]
 # esp-idf installer
-espidf = ["tempfile", "which", "git", "serde", "serde_json", "serde_yaml", "strum", "home", "ureq", "flate2", "tar", "chrono", "serde_with", "semver", "tempdir"]
+espidf = ["tempfile", "which", "git", "serde", "serde_json", "serde_yaml", "strum", "home", "ureq", "flate2", "tar", "chrono", "serde_with", "semver", "tempdir", "sha2", "globwalk", "regex",]
 
 # git utilities
 git = ["remove_dir_all"]
@@ -69,3 +69,5 @@ tar = { version = "0.4", optional = true }
 chrono = { version = "0.4", optional = true }
 semver = { version = "1", optional = true }
 tempdir = { version = "0.3", optional = true }
+sha2 = { version = "0.10", optional = true }
+regex = { version = "1", optional = true }

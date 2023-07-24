@@ -6,6 +6,8 @@ use tar::Archive;
 
 mod api;
 mod metadata;
+mod hashing;
+mod file_util;
 
 pub struct IdfComponentDep {
     pub namespace: String,
