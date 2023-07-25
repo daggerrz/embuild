@@ -3,20 +3,10 @@ use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
-use regex::Regex;
-use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 const BLOCK_SIZE: usize = 65536;
 const HASH_FILENAME: &str = ".component_hash";
-const SHA256_RE: &str = r"^[A-Fa-f0-9]{64}$";
-
-fn hash_object(obj: Value) -> String {
-    let mut sha = Sha256::new();
-    let json_string = json!(obj).to_string();
-    sha.update(json_string.as_bytes());
-    sha.finalize().to_vec().into_iter().map(|b| format!("{:02x}", b)).collect::<Vec<String>>().concat()
-}
 
 fn hash_file(file_path: &Path) -> Result<String> {
     let mut sha = Sha256::new();
@@ -37,7 +27,7 @@ fn hash_file(file_path: &Path) -> Result<String> {
 
 /// Hashes a directory recursively, excluding files and directories matching the given glob patterns.
 /// Based on the `hash_dir` function in `hash_tools.py` from the ESP-IDF.
-fn hash_dir(root: &Path, excludes: Vec<&str>, exclude_default: bool) -> Result<String> {
+pub fn hash_dir(root: &Path, excludes: Vec<&str>, exclude_default: bool) -> Result<String> {
     let mut sha = Sha256::new();
 
     let entries = crate::espidf::components::file_util::filtered_paths(root, excludes, exclude_default)?;
@@ -48,6 +38,7 @@ fn hash_dir(root: &Path, excludes: Vec<&str>, exclude_default: bool) -> Result<S
             (p, rel_path)
         })
         .collect();
+
     // As per `hash_dir` in `hash_tools.py` from the ESP-IDF,
     // sort by relative path in posix format
     entries.sort_by(|(_, a), (_, b)| a.cmp(&b));
@@ -63,43 +54,44 @@ fn hash_dir(root: &Path, excludes: Vec<&str>, exclude_default: bool) -> Result<S
         // Calculate hash of file content and add to hash
         sha.update(hash_file(&path)?.as_bytes());
     }
-    Ok(sha.finalize().to_vec().into_iter().map(|b| format!("{:02x}", b)).collect::<Vec<String>>().concat())
+    let hex_string = sha
+        .finalize()
+        .into_iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .concat();
+
+    Ok(hex_string)
 }
 
-pub fn validate_dir(component_root: &Path, dir_hash: &str) -> Result<bool> {
-    let current_hash = if component_root.is_dir() {
-        hash_dir(component_root, vec![".component_hash"], true)?
-    } else {
-        return Err(anyhow!("Root path is not a directory: {}", component_root.display()));
-    };
-    Ok(current_hash == dir_hash)
-}
-
-pub fn validate_dir_with_hash_file(component_root: &Path) -> Result<()> {
+/// Create a `.component_hash` file in the given directory with the given hash.
+pub fn write_hash_file(component_root: &Path, hash: &str) -> Result<()> {
     let hash_file_path = component_root.join(HASH_FILENAME);
-
-    if !component_root.is_dir() || !hash_file_path.exists() {
-        return Err(anyhow!("Hash file does not exist: {}", hash_file_path.display()));
-    }
-
-    let hash_from_file = std::fs::read_to_string(&hash_file_path)?.trim().to_owned();
-
-    let re = Regex::new(SHA256_RE).unwrap();
-    if !re.is_match(&hash_from_file) {
-        return Err(anyhow!("Hash is not a SHA256"));
-    }
-
-    if !validate_dir(component_root, &hash_from_file)? {
-        return Err(anyhow!("Hash in file '{}' has changed since it was downloaded. Please download the component again.", hash_file_path.display()));
-    }
-    Ok(())
-}
-
-pub fn create_hash_file(root: &Path, hash: &str) -> Result<()> {
-    let hash_file_path = root.join(HASH_FILENAME);
     let mut file = File::create(&hash_file_path)?;
     file.write(hash.as_bytes())?;
     Ok(())
+}
+
+/// Read the hash from a `.component_hash` file in the given directory.
+pub fn read_hash_file(component_root: &Path) -> Result<String> {
+    let hash_file_path = component_root.join(HASH_FILENAME);
+    if hash_file_path.is_file() {
+        let mut file = File::open(&hash_file_path)?;
+        let mut hash = String::new();
+        file.read_to_string(&mut hash)?;
+        Ok(hash.trim().to_owned())
+    } else {
+        Err(anyhow!(
+            r###"
+Hash file does not exist: '{}'
+
+* This file should be created by the component manager when installing a component.
+* Try removing the entire '{}' directory and let the component manager download it again.
+            "###,
+            hash_file_path.display(),
+            component_root.display()
+        ))
+    }
 }
 
 fn to_relative_posix_path(root: &Path, path: &Path) -> String {
@@ -157,19 +149,23 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    // #[ignore]
     fn test_dir_hashing() {
         let tmp_dir = tempdir::TempDir::new("components").unwrap();
 
         // Download and install a component with a known hash
-        let paths = IdfComponentManager::new(tmp_dir.path().clone().to_path_buf())
-            .with_component("espressif/mdns".into(), "1.1.0".into())
+        let solution = IdfComponentManager::new(tmp_dir.path().clone().to_path_buf())
+            .with_component("espressif/mdns".into(), "=1.1.0".into())
             .unwrap()
             .install()
             .unwrap();
 
+        let component = solution.resolved_components.first().unwrap();
+
+        let hash = hash_dir(&component.path, vec![], true).unwrap();
+
         // Check with the known hash
-        validate_dir(paths.first().unwrap(), "46ee81d32fbf850462d8af1e83303389602f6a6a9eddd2a55104cb4c063858ed").unwrap();
+        assert_eq!(hash, "46ee81d32fbf850462d8af1e83303389602f6a6a9eddd2a55104cb4c063858ed");
     }
 
     #[test]
