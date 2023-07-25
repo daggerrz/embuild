@@ -21,7 +21,7 @@ pub struct Dependency {
 }
 
 /// Returns the component metadata read from `path/idf_component.yml` if it exists.
-pub fn get_component_metadata(component_path: &Path) -> Result<Option<Metadata>> {
+pub fn read_component_metadata(component_path: &Path) -> Result<Option<Metadata>> {
     let meta_path = component_path.join("idf_component.yml");
     if meta_path.is_file() {
         let meta = std::fs::read_to_string(&meta_path)?;
@@ -36,8 +36,8 @@ pub fn get_component_metadata(component_path: &Path) -> Result<Option<Metadata>>
 }
 
 /// Check if a component exists in `target_path` and matches the `version_req`.
-pub fn component_exists_and_matches(version_req: &VersionReq, target_path: &Path) -> Result<bool> {
-    if let Some(metadata) = get_component_metadata(target_path)? {
+pub fn installed_component_matches_version(version_req: &VersionReq, target_path: &Path) -> Result<bool> {
+    if let Some(metadata) = read_component_metadata(target_path)? {
         let installed_version = semver::Version::parse(&metadata.version).context(format!(
             "Failed to parse version '{}' of component in '{}'",
             metadata.version,
@@ -64,11 +64,11 @@ mod tests {
 
     #[test]
     fn test_get_component_metadata() {
-        assert_eq!(get_component_metadata(&test_resource("foo")).unwrap(), None);
+        assert_eq!(read_component_metadata(&test_resource("foo")).unwrap(), None);
 
         // Will search for `idf_component.yml`
         assert_eq!(
-            get_component_metadata(&test_resource("")).unwrap(),
+            read_component_metadata(&test_resource("")).unwrap(),
             Some(Metadata {
                 description: "mDNS".to_string(),
                 version: "1.1.0".to_string(),
@@ -87,13 +87,13 @@ mod tests {
         let valid_path = test_resource("");
         // Version is 1.1.0, first check a valid match
         assert!(
-            component_exists_and_matches(&VersionReq::parse(">=1.1.0").unwrap(), &valid_path)
+            installed_component_matches_version(&VersionReq::parse(">=1.1.0").unwrap(), &valid_path)
                 .unwrap()
         );
 
         // Check a non-matching version
         assert!(
-            !component_exists_and_matches(&VersionReq::parse(">=1.2.0").unwrap(), &valid_path)
+            !installed_component_matches_version(&VersionReq::parse(">=1.2.0").unwrap(), &valid_path)
                 .unwrap()
         );
     }

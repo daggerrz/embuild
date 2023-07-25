@@ -9,6 +9,7 @@ mod metadata;
 mod hashing;
 mod file_util;
 
+/// A declared dependency on an ESP-IDF component.
 pub struct IdfComponentDep {
     pub namespace: String,
     pub name: String,
@@ -22,6 +23,33 @@ impl IdfComponentDep {
             name,
             version_req,
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct DepSolution {
+    pub resolved_components: Vec<ResolvedIdfComponent>,
+}
+
+impl DepSolution {
+    pub fn new(resolved_components: Vec<ResolvedIdfComponent>) -> Self {
+        Self { resolved_components }
+    }
+}
+
+/// A resolved dependency to an ESP-IDF component.
+#[derive(Debug)]
+pub struct ResolvedIdfComponent {
+    pub namespace: String,
+    pub name: String,
+    pub version: semver::Version,
+    pub component_hash: Option<String>,
+    pub path: PathBuf,
+}
+
+impl ResolvedIdfComponent {
+    pub fn new(namespace: String, name: String, version: semver::Version, component_hash: Option<String>, path: PathBuf) -> Self {
+        Self { namespace, name, version, component_hash, path }
     }
 }
 
@@ -58,8 +86,8 @@ impl IdfComponentManager {
         Ok(self)
     }
 
-    pub fn install(&self) -> Result<Vec<PathBuf>> {
-        let mut component_dirs = vec![];
+    pub fn install(&self) -> Result<DepSolution> {
+        let mut components = vec![];
         for component in &self.components {
             let target_path = &self
                 .components_dir
@@ -69,69 +97,90 @@ impl IdfComponentManager {
                 "Ensuring component '{}:{}' is installed...",
                 component.name, component.version_req
             );
-            let dir = self.install_component(component, target_path)?;
-            component_dirs.push(dir);
+            let resolved_comp = self.resolve_component(component, target_path)?;
+            components.push(resolved_comp);
         }
-        Ok(component_dirs)
+        let solution = DepSolution::new(components);
+        Ok(solution)
     }
 
-    fn install_component(
+    fn resolve_component(
         &self,
         component: &IdfComponentDep,
-        target_path: &PathBuf,
-    ) -> Result<PathBuf> {
+        component_root: &PathBuf,
+    ) -> Result<ResolvedIdfComponent> {
         // Check if installed component matches
-        if metadata::component_exists_and_matches(&component.version_req, target_path)? {
+        if metadata::installed_component_matches_version(&component.version_req, component_root)? {
             println!(
                 "Component '{}' matching version spec '{}' is already installed.",
                 component.name, component.version_req
             );
         } else {
-            // Delete any old component that might be there
-            if target_path.exists() {
-                println!("Existing component '{}' in `{}` does not match version spec {}. Removing old version...",
-                         component.name, target_path.display(), component.version_req);
-                std::fs::remove_dir_all(target_path).context(format!(
-                    "Failed to remove old version of component '{}' at '{}'",
-                    component.name,
-                    target_path.display()
-                ))?;
-            }
-            // Get metadata from the API
-            let metadata = self
-                .api_client
-                .get_component(&component.namespace, &component.name)
-                .context(format!(
-                    "Failed to get component '{}' from API",
-                    component.name
-                ))?;
-
-            // Construct a list of available versions in case we need to print it
-            let available_versions = metadata
-                .versions
-                .iter()
-                .filter(|v| v.yanked_at.is_none())
-                .map(|v| v.version.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            // Find matching version
-            let version = api::find_best_match(&metadata, &component.version_req)
-                .context(format!("No matching version found for component '{}' with version spec '{}'. Available versions are: {}",
-                                 component.name, component.version_req, available_versions)
-                )?;
-
-            println!(
-                "Downloading and unpacking component '{}:{}' from '{}' to '{}'...",
-                component.name,
-                version.version,
-                version.url,
-                target_path.display()
-            );
-            download_and_unpack(version.url.as_str(), target_path)?;
+            self.install_component(&component, component_root)?;
         }
 
-        Ok(target_path.clone())
+        // Get hash from .component_hash
+        let component_hash = hashing::read_hash_file(component_root)?;
+
+        // Get metadata from `idf_component.yml`
+        let metadata = metadata::read_component_metadata(component_root)?
+            .expect("Component metadata file should exist after install");
+
+        Ok(ResolvedIdfComponent::new(
+            component.namespace.clone(),
+            component.name.clone(),
+            semver::Version::parse(&metadata.version).unwrap(),
+            Some(component_hash),
+            component_root.clone(),
+        ))
+    }
+
+    fn install_component(&self, component: &&IdfComponentDep, target_path: &PathBuf) -> Result<()> {
+        // Delete any old component that might be there
+        if target_path.exists() {
+            println!("Existing component '{}' in `{}` does not match version spec {}. Removing old version...",
+                     component.name, target_path.display(), component.version_req);
+            std::fs::remove_dir_all(target_path).context(format!(
+                "Failed to remove old version of component '{}' at '{}'",
+                component.name,
+                target_path.display()
+            ))?;
+        }
+        // Get metadata from the API
+        let metadata = self
+            .api_client
+            .get_component(&component.namespace, &component.name)
+            .context(format!(
+                "Failed to get component '{}' from API",
+                component.name
+            ))?;
+
+        // Construct a list of available versions in case we need to print it
+        let available_versions = metadata
+            .versions
+            .iter()
+            .filter(|v| v.yanked_at.is_none())
+            .map(|v| v.version.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // Find matching version
+        let version = api::find_best_match(&metadata, &component.version_req)
+            .context(format!("No matching version found for component '{}' with version spec '{}'. Available versions are: {}",
+                             component.name, component.version_req, available_versions)
+            )?;
+
+        println!(
+            "Downloading and unpacking component '{}:{}' from '{}' to '{}'...",
+            component.name,
+            version.version,
+            version.url,
+            target_path.display()
+        );
+        download_and_unpack(version.url.as_str(), target_path)?;
+        let hash = hashing::hash_dir(target_path, vec![], true)?;
+        hashing::write_hash_file(target_path, &hash)?;
+        Ok(())
     }
 }
 
@@ -157,12 +206,13 @@ mod tests {
             .with_component("espressif/mdns".into(), "1.1.0".into())
             .unwrap();
 
-        let paths = mgr.install().unwrap();
+        let solution = mgr.install().unwrap();
         println!(
             "Final component path: {}",
-            paths
+            solution
+                .resolved_components
                 .iter()
-                .map(|p| p.display().to_string())
+                .map(|c| c.path.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
         );
